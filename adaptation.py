@@ -239,7 +239,11 @@ class TradingEnv(gym.Env):
         pos_frac = (self.shares * current_price) / (equity_before + 1e-8)
 
         # Risk-adjusted reward base
-        base = r_t / sigma if self.reward_mode == "risk_adj" else r_t
+        #base = r_t / sigma if self.reward_mode == "risk_adj" else r_t
+        # smooting Sortino try:
+        ratio = r_t / (sigma + 1e-8)
+        base = np.tanh(ratio) if self.reward_mode == "risk_adj" else r_t
+
         # Loss penalty: stronger penalty when return is negative
         loss_pen = self.loss_penalty * abs(r_t) if r_t < 0 else 0.0
         # Asymmetric turnover penalty: penalize buys fully, sells partially
@@ -423,7 +427,7 @@ def main():
                 batch_size=4096,
                 n_epochs=10,
                 policy_kwargs={"net_arch": [256, 256]},
-                ent_coef=0.01,
+                ent_coef=0.15,
             ),
         }
         results = {}
