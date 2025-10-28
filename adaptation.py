@@ -345,6 +345,8 @@ def main():
     parser.add_argument("--inv-mom-penalty", type=float, default=0.02, help="Penalty for inventory under negative momentum")
     parser.add_argument("--sell-turnover-factor", type=float, default=0.5, help="Relative turnover penalty for sells vs buys (0–1)")
     parser.add_argument("--downside-only", action="store_true", help="Use downside-only volatility in risk-adjusted reward")
+    parser.add_argument("--max-trade-fraction", type=float, default=0.1, help="Max fraction of cash/position per trade")
+    parser.add_argument("--lot-size", type=int, default=100, help="Shares per lot for each trade")
     # PPO training knobs
     parser.add_argument("--total-timesteps", type=int, default=400_000, help="Total training timesteps")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Optimizer learning rate")
@@ -432,6 +434,8 @@ def main():
             csv_path=train_csv,
             window_size=args.window_size,
             reward_mode=args.reward_mode,
+            lot_size=int(args.lot_size),
+            max_trade_fraction=float(args.max_trade_fraction),
             risk_window=args.risk_window,
             downside_only=args.downside_only,
             dd_penalty=args.dd_penalty,
@@ -441,6 +445,18 @@ def main():
             sell_turnover_factor=args.sell_turnover_factor,
             starting_cash=100_000.0,
         )
+        # Simple sanity check to avoid silent "no-buy" configurations
+        try:
+            p0 = float(_single_env.prices[_single_env.window_size])
+            lot_value0 = int(args.lot_size) * p0
+            cap_cash0 = float(args.max_trade_fraction) * float(_single_env.starting_cash)
+            if lot_value0 > cap_cash0:
+                print(
+                    f"⚠️ Warning: lot_size×price0 ({lot_value0:.2f}) > max_trade_fraction×starting_cash ({cap_cash0:.2f}). "
+                    "Buys may be impossible initially; consider reducing lot-size or increasing max-trade-fraction."
+                )
+        except Exception:
+            pass
         try:
             _single_env.reset(seed=args.seed)
         except Exception:
@@ -457,6 +473,8 @@ def main():
                     csv_path=train_csv,
                     window_size=args.window_size,
                     reward_mode=args.reward_mode,
+                    lot_size=int(args.lot_size),
+                    max_trade_fraction=float(args.max_trade_fraction),
                     risk_window=args.risk_window,
                     downside_only=args.downside_only,
                     dd_penalty=args.dd_penalty,
@@ -544,6 +562,8 @@ def main():
             csv_path=test_csv,
             window_size=args.window_size,
             reward_mode=args.reward_mode,
+            lot_size=int(args.lot_size),
+            max_trade_fraction=float(args.max_trade_fraction),
             risk_window=args.risk_window,
             downside_only=args.downside_only,
             dd_penalty=args.dd_penalty,
@@ -638,6 +658,8 @@ def main():
                 csv_path=test_csv,
                 window_size=args.window_size,
                 reward_mode=args.reward_mode,
+                lot_size=int(args.lot_size),
+                max_trade_fraction=float(args.max_trade_fraction),
                 risk_window=args.risk_window,
                 downside_only=args.downside_only,
                 dd_penalty=args.dd_penalty,

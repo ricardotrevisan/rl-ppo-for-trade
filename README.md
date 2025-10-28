@@ -11,16 +11,9 @@
   - Designed for reproducible experimentation on policy stability, entropy dynamics, and reward shaping in realistic equity-trading contexts.
 
 **Key Features**
-- Custom `TradingEnv` (see `adaptation.py:23`) with:
-  - Real timestamps from Yahoo data
-  - Configurable `starting_cash`, `lot_size`, `max_trade_fraction` (default 5%)
-  - No short positions (long/flat only)
-  - Per‑trade fees on traded value (`transaction_fee_rate`)
-  - Reward design: log return with optional risk adjustment (rolling volatility), and small penalties for drawdown/turnover/losses
-  - Observation normalization via `VecNormalize`
-- PPO training with optional GPU acceleration (PyTorch CUDA) and parallel environments (`SubprocVecEnv`).
-- Deterministic out‑of‑sample simulation (Option 2) with single‑process evaluation.
-- Robust trade logging: writes a detailed CSV of executed trades collected via `info["trade"]`.
+- Custom `TradingEnv` with realistic constraints (fees, lots, trade caps), optional risk‑adjusted rewards, and observation normalization.
+- PPO training (Stable‑Baselines3), with GPU support and parallel envs for speed.
+- Simple, scriptable CLI: train/eval modes, core knobs exposed, and utilities for multi‑seed runs and data cleanup.
 
 **Data Handling**
 - On first run, the script caches Yahoo Finance OHLCV to CSV under `data/` so multiple workers don’t re‑download.
@@ -65,42 +58,43 @@ Notes on TA‑Lib
   - `pip install stable-baselines3 gymnasium torch yfinance pandas numpy matplotlib ta-lib`
 - For CUDA PyTorch, install the matching wheel for your CUDA version (see PyTorch docs), then install the rest.
 
-**How To Run**
-- Start the script:
-  - `python adaptation.py [--window-size N] [--risk-window M] [--train-start YYYY-MM-DD] [--train-end YYYY-MM-DD] [--eval-start YYYY-MM-DD] [--eval-end YYYY-MM-DD]`
-    - `--window-size` (default `20`): observation window size used for features
-    - `--risk-window` (default `20`): rolling window for risk adjustment in reward
-    - `--train-start` (default `2022-01-01`) / `--train-end` (default `2023-01-01`): training data range
-    - `--eval-start` (default `2023-01-02`) / `--eval-end` (default `2025-12-31`): evaluation data range
-- You will be prompted:
-  - `[1] Treinar novo modelo` — trains PPO with 8 parallel envs (uses GPU if available), saves the best model and VecNormalize stats
-  - `[2] Carregar e rodar existente` — loads the saved model and runs a deterministic out‑of‑sample simulation (single‑process)
+**Quick Start**
+- Train (non‑interactive):
+  - `uv run adaptation.py --mode train --train-start 2022-01-01 --train-end 2023-01-01 --eval-start 2023-01-02 --eval-end 2025-12-31`
+- Evaluate saved model:
+  - `uv run adaptation.py --mode eval --eval-start 2023-01-02 --eval-end 2025-12-31`
+- Minimal knobs you may want to change:
+  - Data windows: `--train-start/--train-end/--eval-start/--eval-end`
+  - Reward base: `--reward-mode {log,risk_adj}` and `--risk-window` (default 20)
+  - Trading behavior: `--max-trade-fraction` (default 0.10), `--lot-size` (default 100)
+  - Speed/repro: `--num-envs 8` (faster) or `--num-envs 1 --deterministic` (reproducible)
 
 **Outputs**
-- `metrics_best_model.csv` — time series of portfolio, returns, drawdown for the simulation period
-- `trade_log_detailed.csv` — per‑trade records collected during evaluation, with:
-  - timestamp, symbol, side, qty, price, fees, equity_before, equity_after, position_qty_after
-- `run_results.png` — portfolio equity curve plot for the simulation
-- Console summary — action counts, trades executed, total return, daily mean return, annualized vol, Sharpe, max drawdown
+- Metrics: CSVs under `data/metrics/` (portfolio, returns, drawdown by run/slice)
+- Trades: CSVs under `data/trades/` with per‑trade records (timestamp, side, qty, price, fees, equity before/after, position)
+- Graphs: PNGs under `data/graphs/` (equity curve)
+- Console: action counts, trades executed, total return, daily mean, annualized vol, Sharpe, max drawdown
 
-**Configuration**
-- Core parameters (set in `TradingEnv` constructor in `adaptation.py`):
-  - `starting_cash` (default `100_000.0`)
-  - `lot_size` (default `100`)
-  - `max_trade_fraction` (default `0.05` → 5%)
-  - `transaction_fee_rate` (default `0.0005` → 5 bps)
-  - `window_size` (default `20`)
-  - Reward knobs: `reward_mode` ("log" or "risk_adj"), `risk_window`, `downside_only`, `dd_penalty`, `turnover_penalty`, `loss_penalty`
+**Common CLI Flags**
+- Data: `--train-start/--train-end/--eval-start/--eval-end`, `--window-size`, `--risk-window`, `--downside-only`
+- Reward: `--reward-mode {log,risk_adj}`, `--dd-penalty`, `--turnover-penalty`, `--loss-penalty`, `--inv-mom-penalty`, `--sell-turnover-factor`
+- Trading: `--max-trade-fraction` (cap per trade), `--lot-size` (shares per lot), `--starting-cash` (via code default 100k)
+- PPO: `--total-timesteps`, `--learning-rate`, `--batch-size`, `--n-steps`, `--n-epochs`, `--ent-coef`, `--clip-range`, `--num-envs`
+- Repro: `--seed`, `--deterministic`
 
 **Realism Considerations**
 - Execution timing: current logic fills at the current bar price and marks to next. For stricter realism, you can shift fills to the next open/bar and add a spread/slippage model.
 - Liquidity: the 5% cap constrains turnover; you can add ADV‑based caps if needed.
 
 **Troubleshooting**
-- TA‑Lib import error: ensure the TA‑Lib system library is installed or use a compatible wheel for your platform.
-- Empty trade log: see the action counts in console; if the policy held, there may be no trades. Fees and caps also affect trade frequency.
-- GPU not used: verify with `python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"` and check `nvidia-smi` during training.
+- No trades: ensure one lot fits the cap (lot_size × price ≤ max_trade_fraction × cash). Adjust `--lot-size` and/or `--max-trade-fraction`.
+- TA‑Lib import: install system TA‑Lib or a compatible wheel.
+- GPU not used: verify CUDA is available in PyTorch and `nvidia-smi` shows activity.
+
+**Utilities**
+- Multi‑seed runner: see `data/util/README.md` for `run_multi_seed.py` (aggregate metrics across seeds).
+- Data cleaner: see `data/util/README.md` for `clear_data.py` (remove `.csv`/`.png` under `data/`).
 
 **File Map**
-- `adaptation.py` — environment, training, evaluation pipeline and caching
-- `data/` — CSV cache for Yahoo Finance downloads (auto‑created)
+- `adaptation.py` — environment, training/evaluation pipeline, caching
+- `data/` — cached market data and outputs (`metrics/`, `trades/`, `graphs/`)
