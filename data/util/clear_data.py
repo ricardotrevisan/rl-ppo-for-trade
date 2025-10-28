@@ -5,7 +5,6 @@ from pathlib import Path
 
 
 def find_repo_root(start: Path) -> Path | None:
-    """Retorna o diretório raiz do repositório (aquele que contém .git), se existir."""
     p = start.resolve()
     for candidate in [p] + list(p.parents):
         if (candidate / ".git").exists():
@@ -14,7 +13,6 @@ def find_repo_root(start: Path) -> Path | None:
 
 
 def collect_files(data_dir: Path, exts: list[str]) -> list[Path]:
-    """Retorna todos os arquivos dentro de data_dir que tenham uma das extensões fornecidas."""
     files = set()
     for ext in exts:
         ext = ext if ext.startswith(".") else f".{ext}"

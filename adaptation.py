@@ -338,12 +338,23 @@ def main():
         ),
     )
     # Optional reward/behavior knobs
+    parser.add_argument("--reward-mode", type=str, default="risk_adj", choices=["log", "risk_adj"], help="Base reward: log or risk_adj (r/sigma)")
     parser.add_argument("--dd-penalty", type=float, default=0.05, help="Drawdown penalty weight")
     parser.add_argument("--turnover-penalty", type=float, default=0.002, help="Turnover penalty weight")
     parser.add_argument("--loss-penalty", type=float, default=0.10, help="Negative return loss penalty weight")
     parser.add_argument("--inv-mom-penalty", type=float, default=0.02, help="Penalty for inventory under negative momentum")
     parser.add_argument("--sell-turnover-factor", type=float, default=0.5, help="Relative turnover penalty for sells vs buys (0–1)")
     parser.add_argument("--downside-only", action="store_true", help="Use downside-only volatility in risk-adjusted reward")
+    # PPO training knobs
+    parser.add_argument("--total-timesteps", type=int, default=400_000, help="Total training timesteps")
+    parser.add_argument("--learning-rate", type=float, default=3e-4, help="Optimizer learning rate")
+    parser.add_argument("--batch-size", type=int, default=4096, help="PPO minibatch size")
+    parser.add_argument("--n-steps", type=int, default=2048, help="Rollout steps per env before update")
+    parser.add_argument("--n-epochs", type=int, default=10, help="PPO epochs per update")
+    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient (exploration strength)")
+    parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
+    # Non-interactive mode
+    parser.add_argument("--mode", choices=["train", "eval"], help="Run mode without prompt: train or eval")
     # Reproducibility / performance knobs
     parser.add_argument("--seed", type=int, default=42, help="Base random seed for training/eval")
     parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel envs for training")
@@ -390,23 +401,26 @@ def main():
             pass
     print(f"Training device: {device}")
     print(
-        f"Config: window_size={args.window_size}, risk_window={args.risk_window}, "
+        f"Config: window_size={args.window_size}, risk_window={args.risk_window}, reward_mode={args.reward_mode}, "
         f"train=({args.train_start}→{args.train_end}), eval=({args.eval_start}→{args.eval_end})"
     )
     today = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Escolha do modo
-    choice = input("\nEscolha o modo: [1] Treinar novo modelo  |  [2] Carregar e rodar existente: ")
+    # Escolha do modo (non-interactive if --mode provided)
+    mode = args.mode
+    if mode is None:
+        choice = input("\nEscolha o modo: [1] Treinar novo modelo  |  [2] Carregar e rodar existente: ")
+        mode = "eval" if choice.strip() == "2" else "train"
 
     # Treinamento ou carregamento
-    if choice.strip() == "2" and os.path.exists("best_trading_model_PPO.zip"):
+    if mode == "eval" and os.path.exists("best_trading_model_PPO.zip"):
         print("\n" + "=" * 60)
         print("Carregando modelo salvo existente...")
         best_name = "PPO"
         # Carregar modelo diretamente (sem workers) e usar VecNormalize apenas na avaliação
         best_model = PPO.load("best_trading_model_PPO.zip", device=device)
         print("✓ Modelo carregado com sucesso!")
-    else:
+    elif mode == "train":
         print("\n" + "=" * 60)
         print("Treinando novos modelos PPO e A2C...")
         # Preparar cache de treino e um único env para validação do espaço
@@ -417,6 +431,7 @@ def main():
             end=args.train_end,
             csv_path=train_csv,
             window_size=args.window_size,
+            reward_mode=args.reward_mode,
             risk_window=args.risk_window,
             downside_only=args.downside_only,
             dd_penalty=args.dd_penalty,
@@ -441,6 +456,7 @@ def main():
                     end=args.train_end,
                     csv_path=train_csv,
                     window_size=args.window_size,
+                    reward_mode=args.reward_mode,
                     risk_window=args.risk_window,
                     downside_only=args.downside_only,
                     dd_penalty=args.dd_penalty,
@@ -470,12 +486,13 @@ def main():
                 vec_env,
                 device=device,
                 verbose=0,
-                learning_rate=3e-4,
-                n_steps=2048,  # per env; total = n_steps * n_envs
-                batch_size=4096,
-                n_epochs=10,
+                learning_rate=float(args.learning_rate),
+                n_steps=int(args.n_steps),  # per env; total = n_steps * n_envs
+                batch_size=int(args.batch_size),
+                n_epochs=int(args.n_epochs),
                 policy_kwargs={"net_arch": [256, 256]},
-                ent_coef=0.15,
+                ent_coef=float(args.ent_coef),
+                clip_range=float(args.clip_range),
                 seed=args.seed,
             ),
         }
@@ -483,7 +500,7 @@ def main():
         for name, model in algorithms.items():
             print(f"\nTreinando {name}...")
             callback = ProgressCallback(check_freq=2000, verbose=0)
-            model.learn(total_timesteps=200_000, callback=callback, progress_bar=True)
+            model.learn(total_timesteps=int(args.total_timesteps), callback=callback, progress_bar=True)
             results[name] = {"model": model, "rewards": callback.rewards}
             print(f"✓ {name} concluído!")
 
@@ -492,6 +509,8 @@ def main():
         best_model.save(f"best_trading_model_{best_name}.zip")
         vec_env.save("vec_normalize.pkl")
         print(f"\n✓ Melhor modelo salvo: best_trading_model_{best_name}.zip")
+    else:
+        raise SystemExit("Modo 'eval' selecionado, mas o arquivo best_trading_model_PPO.zip não foi encontrado.")
 
     # Avaliação e métricas
     print("\n" + "=" * 60)
@@ -524,6 +543,7 @@ def main():
             end=end_date,
             csv_path=test_csv,
             window_size=args.window_size,
+            reward_mode=args.reward_mode,
             risk_window=args.risk_window,
             downside_only=args.downside_only,
             dd_penalty=args.dd_penalty,
@@ -617,6 +637,7 @@ def main():
                 end=end_date,
                 csv_path=test_csv,
                 window_size=args.window_size,
+                reward_mode=args.reward_mode,
                 risk_window=args.risk_window,
                 downside_only=args.downside_only,
                 dd_penalty=args.dd_penalty,
