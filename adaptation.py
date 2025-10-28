@@ -13,6 +13,7 @@ from stable_baselines3.common.monitor import Monitor
 import talib
 import torch
 import os
+import random
 import warnings
 from datetime import datetime, timedelta
 import argparse
@@ -48,13 +49,13 @@ class TradingEnv(gym.Env):
     def __init__(
         self,
         ticker="PETR4.SA",
-        start="2022-01-01",
+        start="2019-01-01",
         end="2023-01-01",
         csv_path=None,
         window_size=20,
         lot_size=100,
         starting_cash=100_000.0,
-        max_trade_fraction=0.05,
+        max_trade_fraction=0.1,
         transaction_fee_rate=0.0005,
         # Reward settings
         reward_mode="risk_adj",  # "log" or "risk_adj"
@@ -343,14 +344,50 @@ def main():
     parser.add_argument("--inv-mom-penalty", type=float, default=0.02, help="Penalty for inventory under negative momentum")
     parser.add_argument("--sell-turnover-factor", type=float, default=0.5, help="Relative turnover penalty for sells vs buys (0–1)")
     parser.add_argument("--downside-only", action="store_true", help="Use downside-only volatility in risk-adjusted reward")
+    # Reproducibility / performance knobs
+    parser.add_argument("--seed", type=int, default=42, help="Base random seed for training/eval")
+    parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel envs for training")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Enable deterministic training (forces CPU, disables CuDNN benchmark, single env)",
+    )
     args = parser.parse_args()
 
-    # Device selection (prefer GPU)
-    device = (
+    # Device selection (prefer GPU unless deterministic requested)
+    auto_device = (
         "cuda" if torch.cuda.is_available() else (
             "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
         )
     )
+    device = "cpu" if args.deterministic else auto_device
+
+    # Global seeding for reproducibility
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    # Optional deterministic guards (may reduce performance)
+    if args.deterministic:
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            pass
+        try:
+            import torch.backends.cudnn as cudnn  # type: ignore
+            cudnn.deterministic = True
+            cudnn.benchmark = False
+        except Exception:
+            pass
+        # Some CUDA ops require this env var for determinism
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        # Reduce thread-level nondeterminism
+        try:
+            torch.set_num_threads(1)
+        except Exception:
+            pass
     print(f"Training device: {device}")
     print(
         f"Config: window_size={args.window_size}, risk_window={args.risk_window}, "
@@ -389,6 +426,10 @@ def main():
             sell_turnover_factor=args.sell_turnover_factor,
             starting_cash=100_000.0,
         )
+        try:
+            _single_env.reset(seed=args.seed)
+        except Exception:
+            pass
         check_env(_single_env, warn=True)
 
         # Parallel environments apenas para treino
@@ -412,9 +453,16 @@ def main():
                 return Monitor(e)
             return _thunk
 
-        n_envs = 8
-        vec_env = SubprocVecEnv([make_env() for _ in range(n_envs)])
+        n_envs = max(1, int(args.num_envs))
+        if args.deterministic or n_envs == 1:
+            vec_env = DummyVecEnv([make_env()])
+        else:
+            vec_env = SubprocVecEnv([make_env() for _ in range(n_envs)])
         vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
+        try:
+            vec_env.seed(args.seed)
+        except Exception:
+            pass
         print(f"Parallel envs: {n_envs}")
         algorithms = {
             "PPO": PPO(
@@ -428,6 +476,7 @@ def main():
                 n_epochs=10,
                 policy_kwargs={"net_arch": [256, 256]},
                 ent_coef=0.15,
+                seed=args.seed,
             ),
         }
         results = {}
@@ -494,6 +543,10 @@ def main():
         else:
             print("⚠️ VecNormalize não encontrado. Avaliação sem normalização de observações.")
 
+        try:
+            eval_vec_env.seed(args.seed)
+        except Exception:
+            pass
         obs = eval_vec_env.reset()
         try:
             starting_cash_eval = float(eval_trading_env.starting_cash)
@@ -578,6 +631,10 @@ def main():
                 log_env = VecNormalize.load("vec_normalize.pkl", log_env)
                 log_env.training = False
                 log_env.norm_reward = False
+            try:
+                log_env.seed(args.seed)
+            except Exception:
+                pass
             log_obs = log_env.reset()
             rows = []
             steps_to_log = int(args.log_action_probs)
