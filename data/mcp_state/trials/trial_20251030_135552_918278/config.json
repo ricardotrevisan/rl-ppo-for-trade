@@ -1,0 +1,23 @@
+{
+  "params": {
+    "learning_rate": 0.001
+  },
+  "fast_mode": true,
+  "tag": null,
+  "cmd": [
+    "/home/trevisan/.local/bin/uv",
+    "run",
+    "adaptation.py",
+    "--learning-rate",
+    "0.001",
+    "--mode",
+    "train",
+    "--total-timesteps",
+    "40000",
+    "--num-envs",
+    "1",
+    "--deterministic",
+    "--print-params"
+  ],
+  "created_at": "2025-10-30T13:55:52.918832"
+}

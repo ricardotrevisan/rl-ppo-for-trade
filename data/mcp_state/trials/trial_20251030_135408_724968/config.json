@@ -1,0 +1,23 @@
+{
+  "params": {
+    "symbol": "PETR4",
+    "strategy": "default",
+    "optimize_for": "max_return"
+  },
+  "fast_mode": true,
+  "tag": "petr4_max_return",
+  "cmd": [
+    "/home/trevisan/.local/bin/uv",
+    "run",
+    "adaptation.py",
+    "--mode",
+    "train",
+    "--total-timesteps",
+    "40000",
+    "--num-envs",
+    "1",
+    "--deterministic",
+    "--print-params"
+  ],
+  "created_at": "2025-10-30T13:54:08.725370"
+}

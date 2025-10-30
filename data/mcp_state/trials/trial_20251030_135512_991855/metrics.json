@@ -1,0 +1,13 @@
+{
+  "ret_total_pct": 15.9,
+  "ret_mean_daily_pct": 0.0231,
+  "vol_annual_pct": 9.0,
+  "sharpe": 0.647,
+  "max_drawdown_pct": -11.59,
+  "bh_ret_pct": 124.13,
+  "actions_hold": 6,
+  "actions_buy": 182,
+  "actions_sell": 497,
+  "trades": 579.0,
+  "trades_executed": 579
+}

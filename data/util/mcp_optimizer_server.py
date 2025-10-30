@@ -79,5 +79,6 @@ def optimizer_pin_best(trial_id: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8008)
+
 
