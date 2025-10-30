@@ -174,6 +174,8 @@ def validate_params(params: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, 
     _posint("batch_size")
     _in("ent_coef", 0.0, 0.2)
     _in("clip_range", 0.05, 0.5)
+    _in("gamma", 0.80, 0.9999)
+    _in("gae_lambda", 0.0, 1.0)
     # Reward mode
     if "reward_mode" in p and p["reward_mode"] not in ("log", "risk_adj"):
         errs.append("reward_mode must be 'log' or 'risk_adj'")
@@ -206,7 +208,7 @@ def build_adaptation_cmd(params: Dict[str, Any], fast_mode: bool = True) -> List
         if k in params and params[k] is not None:
             cmd += arg(k.replace("_", "-"), params[k])
     # PPO knobs
-    for k in ("learning_rate", "batch_size", "n_steps", "n_epochs", "ent_coef", "clip_range"):
+    for k in ("learning_rate", "batch_size", "n_steps", "n_epochs", "ent_coef", "clip_range", "gamma", "gae_lambda"):
         if k in params and params[k] is not None:
             cmd += arg(k.replace("_", "-"), params[k])
     # Mode and misc

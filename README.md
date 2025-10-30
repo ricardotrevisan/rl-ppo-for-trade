@@ -81,7 +81,7 @@ Notes on TA‑Lib
 - Data: `--train-start/--train-end/--eval-start/--eval-end`, `--window-size`, `--risk-window`, `--downside-only`
 - Reward: `--reward-mode {log,risk_adj}`, `--dd-penalty`, `--turnover-penalty`, `--loss-penalty`, `--inv-mom-penalty`, `--sell-turnover-factor`
 - Trading: `--max-trade-fraction` (cap per trade), `--lot-size` (shares per lot), `--starting-cash` (via code default 100k)
-- PPO: `--total-timesteps`, `--learning-rate`, `--batch-size`, `--n-steps`, `--n-epochs`, `--ent-coef`, `--clip-range`, `--num-envs`
+- PPO: `--total-timesteps`, `--learning-rate`, `--batch-size`, `--n-steps`, `--n-epochs`, `--ent-coef`, `--clip-range`, `--gamma`, `--gae-lambda`, `--num-envs`
 - Repro: `--seed`, `--deterministic`
  - Diagnostics: `--print-params` (prints all run parameters before executing)
 
@@ -121,6 +121,7 @@ Notes on TA‑Lib
   - `optimizer_list_trials(top?)`
   - `optimizer_get_best()`
   - `optimizer_pin_best(trial_id)`
+  - Supported PPO params via `params`: `learning_rate`, `batch_size`, `n_steps`, `n_epochs`, `ent_coef`, `clip_range`, `gamma`, `gae_lambda`, plus `total_timesteps`, `num_envs`, and `seed`.
 - Run server:
   - `uv run data/util/mcp_optimizer_server.py`
   - Or `python data/util/mcp_optimizer_server.py`

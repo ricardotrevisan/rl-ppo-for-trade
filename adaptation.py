@@ -336,6 +336,8 @@ def main():
     parser.add_argument("--n-epochs", type=int, default=10, help="PPO epochs per update")
     parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient (exploration strength)")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for future rewards (0-1)")
+    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda parameter (0-1)")
     # Non-interactive mode
     parser.add_argument("--mode", choices=["train", "eval"], help="Run mode without prompt: train or eval")
     # Reproducibility / performance knobs
@@ -506,6 +508,8 @@ def main():
                 policy_kwargs={"net_arch": [256, 256]},
                 ent_coef=float(args.ent_coef),
                 clip_range=float(args.clip_range),
+                gamma=float(args.gamma),
+                gae_lambda=float(args.gae_lambda),
                 seed=args.seed,
             ),
         }
