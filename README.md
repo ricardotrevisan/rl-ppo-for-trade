@@ -68,6 +68,8 @@ Notes on TA‑Lib
   - Reward base: `--reward-mode {log,risk_adj}` and `--risk-window` (default 20)
   - Trading behavior: `--max-trade-fraction` (default 0.10), `--lot-size` (default 100)
   - Speed/repro: `--num-envs 8` (faster) or `--num-envs 1 --deterministic` (reproducible)
+ - Print all used params to terminal:
+   - Add `--print-params` to any command to dump the full run configuration (CLI args plus derived settings like device and effective env count).
 
 **Outputs**
 - Metrics: CSVs under `data/metrics/` (portfolio, returns, drawdown by run/slice)
@@ -81,6 +83,7 @@ Notes on TA‑Lib
 - Trading: `--max-trade-fraction` (cap per trade), `--lot-size` (shares per lot), `--starting-cash` (via code default 100k)
 - PPO: `--total-timesteps`, `--learning-rate`, `--batch-size`, `--n-steps`, `--n-epochs`, `--ent-coef`, `--clip-range`, `--num-envs`
 - Repro: `--seed`, `--deterministic`
+ - Diagnostics: `--print-params` (prints all run parameters before executing)
 
 **Realism Considerations**
 - Execution timing: current logic fills at the current bar price and marks to next. For stricter realism, you can shift fills to the next open/bar and add a spread/slippage model.

@@ -17,6 +17,7 @@ import random
 import warnings
 from datetime import datetime, timedelta
 import argparse
+import json
 warnings.filterwarnings("ignore")
 import multiprocessing as mp
 try:
@@ -307,35 +308,15 @@ class ProgressCallback(BaseCallback):
 
 def main():
     parser = argparse.ArgumentParser(description="Train/Evaluate PPO trading agent with configurable windows")
-    parser.add_argument("--window-size", "-w", type=int, default=20,
-                        help="Observation window size for features (default: 20)")
-    parser.add_argument("--risk-window", "-r", type=int, default=20,
-                        help="Rolling risk window for reward adjustment (default: 20)")
-    parser.add_argument("--train-start", type=str, default="2022-01-01",
-                        help="Training data start date (YYYY-MM-DD)")
-    parser.add_argument("--train-end", type=str, default="2023-01-01",
-                        help="Training data end date (YYYY-MM-DD)")
-    parser.add_argument("--eval-start", type=str, default="2023-01-02",
-                        help="Evaluation data start date (YYYY-MM-DD)")
-    parser.add_argument("--eval-end", type=str, default="2025-12-31",
-                        help="Evaluation data end date (YYYY-MM-DD)")
-    parser.add_argument(
-        "--eval-slices",
-        type=str,
-        nargs='*',
-        help=(
-            "Optional extra evaluation ranges as start:end pairs. "
-            "Example: --eval-slices 2024-01-02:2024-12-31 2025-01-02:2025-10-23"
-        ),
+    parser.add_argument("--window-size", "-w", type=int, default=20, help="Observation window size for features (default: 20)")
+    parser.add_argument("--risk-window", "-r", type=int, default=20, help="Rolling risk window for reward adjustment (default: 20)")
+    parser.add_argument("--train-start", type=str, default="2022-01-01",help="Training data start date (YYYY-MM-DD)")
+    parser.add_argument("--train-end", type=str, default="2023-01-01",help="Training data end date (YYYY-MM-DD)")
+    parser.add_argument("--eval-start", type=str, default="2023-01-02",help="Evaluation data start date (YYYY-MM-DD)")
+    parser.add_argument("--eval-end", type=str, default="2025-12-31", help="Evaluation data end date (YYYY-MM-DD)")
+    parser.add_argument("--eval-slices", type=str, nargs='*', help=("Optional extra evaluation ranges as start:end pairs. Example: --eval-slices 2024-01-02:2024-12-31 2025-01-02:2025-10-23"),
     )
-    parser.add_argument(
-        "--log-action-probs",
-        type=int,
-        default=0,
-        help=(
-            "If > 0, logs per-step action probabilities for up to N steps "
-            "of each evaluation slice to CSV."
-        ),
+    parser.add_argument("--log-action-probs", type=int, default=0, help=("If > 0, logs per-step action probabilities for up to N steps of each evaluation slice to CSV."),
     )
     # Optional reward/behavior knobs
     parser.add_argument("--reward-mode", type=str, default="risk_adj", choices=["log", "risk_adj"], help="Base reward: log or risk_adj (r/sigma)")
@@ -360,11 +341,9 @@ def main():
     # Reproducibility / performance knobs
     parser.add_argument("--seed", type=int, default=42, help="Base random seed for training/eval")
     parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel envs for training")
-    parser.add_argument(
-        "--deterministic",
-        action="store_true",
-        help="Enable deterministic training (forces CPU, disables CuDNN benchmark, single env)",
-    )
+    parser.add_argument("--deterministic",action="store_true", help="Enable deterministic training (forces CPU, disables CuDNN benchmark, single env)")
+    # Diagnostics / printing
+    parser.add_argument("--print-params", action="store_true", help="Print all run parameters to terminal before executing")
     args = parser.parse_args()
 
     # Device selection (prefer GPU unless deterministic requested)
@@ -406,6 +385,22 @@ def main():
         f"Config: window_size={args.window_size}, risk_window={args.risk_window}, reward_mode={args.reward_mode}, "
         f"train=({args.train_start}→{args.train_end}), eval=({args.eval_start}→{args.eval_end})"
     )
+
+    # Optional: print all run parameters used
+    if getattr(args, "print_params", False):
+        try:
+            effective_num_envs = 1 if args.deterministic else max(1, int(args.num_envs))
+        except Exception:
+            effective_num_envs = args.num_envs
+        params_out = {
+            **{k: v for k, v in vars(args).items()},
+            "device": device,
+            "effective_num_envs": effective_num_envs,
+            "ticker": "PETR4.SA",
+        }
+        print("\n=== Run Parameters ===")
+        print(json.dumps(params_out, indent=2, sort_keys=True, ensure_ascii=False))
+        print("======================\n")
     today = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Escolha do modo (non-interactive if --mode provided)
