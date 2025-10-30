@@ -57,7 +57,10 @@ def optimizer_run_trial(
 def optimizer_validate_params(params: dict) -> dict:
     """Validate and normalize params without running."""
     ok, errs, out = core.validate_params(params)
-    return {"ok": ok, "errors": errs, "params": out}
+    if ok:
+        return {"status": "ok", "params": out}
+    else:
+        return {"status": "invalid", "reasons": errs, "params": out}
 
 
 @mcp.tool()
@@ -80,5 +83,4 @@ def optimizer_pin_best(trial_id: str) -> dict:
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="0.0.0.0", port=8008)
-
 
