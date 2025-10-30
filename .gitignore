@@ -14,3 +14,4 @@ uv.lock
 .venv
 **/node_modules/
 .notes*
+data/mcp_state/
