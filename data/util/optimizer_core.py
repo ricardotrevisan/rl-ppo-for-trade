@@ -82,6 +82,9 @@ def _parse_metrics(text: str) -> Dict[str, Any]:
                 m["actions_buy"] = int(mo.group(2))
                 m["actions_sell"] = int(mo.group(3))
             continue
+        # Skip 'trades' here; we record it as 'trades_executed' below
+        if key == "trades":
+            continue
         mo = pat.search(text)
         if mo:
             val = mo.group(1)
@@ -414,4 +417,3 @@ def main_cli():
 
 if __name__ == "__main__":
     main_cli()
-
