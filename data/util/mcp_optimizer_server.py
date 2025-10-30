@@ -6,6 +6,8 @@ from typing import Optional
 from pathlib import Path
 
 from fastmcp import FastMCP
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict
 import math
 
 # Reuse optimizer core helpers
@@ -16,6 +18,8 @@ import optimizer_core as core  # type: ignore
 
 
 mcp = FastMCP("optimizer")
+_executor = ThreadPoolExecutor(max_workers=2)
+_futures: Dict[str, object] = {}
 
 
 def _sanitize(obj):
@@ -94,6 +98,44 @@ def optimizer_get_best() -> dict:
 def optimizer_pin_best(trial_id: str) -> dict:
     """Pin a specific trial as best."""
     return core.pin_best(trial_id)
+
+
+@mcp.tool()
+def optimizer_start_trial(
+    params: dict,
+    tag: Optional[str] = None,
+    fast_mode: bool = True,
+    timeout_minutes: int = 180,
+) -> dict:
+    """Start a trial asynchronously and return the trial_id immediately."""
+    trial_id = core._now_id()  # type: ignore[attr-defined]
+    # Submit background task
+    fut = _executor.submit(core.run_trial, params, tag, fast_mode, timeout_minutes, trial_id)
+    _futures[trial_id] = fut
+    return {"status": "started", "trial_id": trial_id}
+
+
+@mcp.tool()
+def optimizer_poll_trial(trial_id: str) -> dict:
+    """Poll the status of a previously started trial."""
+    # If we have a future, check its status
+    fut = _futures.get(trial_id)
+    if fut is not None:
+        if getattr(fut, "done", lambda: False)():
+            try:
+                res = fut.result()
+                return {"status": "done", "result": _sanitize(res)}
+            finally:
+                # Allow GC
+                _futures.pop(trial_id, None)
+        else:
+            return {"status": "running"}
+    # Fallback to filesystem status for processes started in a prior session
+    status = core.read_trial_status(trial_id)
+    if status and status.get("status") and status.get("status") != "running":
+        res = core.read_trial_result(trial_id) or {}
+        return {"status": "done", "result": _sanitize(res)}
+    return {"status": "running"}
 
 
 if __name__ == "__main__":

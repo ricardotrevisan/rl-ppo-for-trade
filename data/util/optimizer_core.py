@@ -240,12 +240,18 @@ def _read_text_limited(path: Path, limit: int = 2_000_000) -> str:
         return ""
 
 
-def run_trial(params: Dict[str, Any], tag: Optional[str] = None, fast_mode: bool = True, timeout_minutes: int = 180) -> Dict[str, Any]:
+def run_trial(
+    params: Dict[str, Any],
+    tag: Optional[str] = None,
+    fast_mode: bool = True,
+    timeout_minutes: int = 180,
+    trial_id: Optional[str] = None,
+) -> Dict[str, Any]:
     _ensure_dirs()
     ok, errs, validated = validate_params(params)
     if not ok:
         return {"status": "invalid", "errors": errs}
-    trial_id = _now_id()
+    trial_id = trial_id or _now_id()
     tdir = TRIALS_DIR / trial_id
     tdir.mkdir(parents=True, exist_ok=True)
 
@@ -258,6 +264,15 @@ def run_trial(params: Dict[str, Any], tag: Optional[str] = None, fast_mode: bool
         "created_at": dt.datetime.now().isoformat(),
     }
     (tdir / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    # Write initial running status for async pollers
+    (tdir / "status.json").write_text(json.dumps({
+        "status": "running",
+        "trial_id": trial_id,
+        "tag": tag,
+        "fast_mode": bool(fast_mode),
+        "timeout_minutes": int(timeout_minutes),
+        "created_at": config["created_at"],
+    }, indent=2, ensure_ascii=False))
 
     before = _snapshot_outputs()
     try:
@@ -270,6 +285,11 @@ def run_trial(params: Dict[str, Any], tag: Optional[str] = None, fast_mode: bool
             cwd=str(ROOT),
         )
     except subprocess.TimeoutExpired:
+        # Persist timeout status for pollers
+        (tdir / "status.json").write_text(json.dumps({
+            "status": "timeout",
+            "trial_id": trial_id,
+        }, indent=2, ensure_ascii=False))
         return {"status": "timeout", "trial_id": trial_id}
     after = _snapshot_outputs()
     new_files = sorted([str(p.relative_to(ROOT)) for p in after - before])
@@ -312,7 +332,7 @@ def run_trial(params: Dict[str, Any], tag: Optional[str] = None, fast_mode: bool
             writer.writeheader()
         writer.writerow(row)
 
-    return {
+    result = {
         "status": "ok" if run.returncode == 0 else f"exit_{run.returncode}",
         "trial_id": trial_id,
         "metrics": metrics,
@@ -321,6 +341,14 @@ def run_trial(params: Dict[str, Any], tag: Optional[str] = None, fast_mode: bool
         "stderr_path": str((tdir / "stderr.txt").relative_to(ROOT)),
         "config_path": str((tdir / "config.json").relative_to(ROOT)),
     }
+    # Update status and persist result snapshot for async pollers
+    (tdir / "status.json").write_text(json.dumps({
+        "status": result["status"],
+        "trial_id": trial_id,
+        "completed_at": dt.datetime.now().isoformat(),
+    }, indent=2, ensure_ascii=False))
+    (tdir / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
 
 
 def list_trials(limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -383,6 +411,26 @@ def read_trial_config(trial_id: str) -> Optional[Dict[str, Any]]:
 
 def read_trial_metrics(trial_id: str) -> Optional[Dict[str, Any]]:
     p = TRIALS_DIR / trial_id / "metrics.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+
+def read_trial_status(trial_id: str) -> Optional[Dict[str, Any]]:
+    p = TRIALS_DIR / trial_id / "status.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+
+def read_trial_result(trial_id: str) -> Optional[Dict[str, Any]]:
+    p = TRIALS_DIR / trial_id / "result.json"
     if p.exists():
         try:
             return json.loads(p.read_text())

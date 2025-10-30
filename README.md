@@ -97,16 +97,16 @@ Notes on TA‑Lib
 **Utilities**
 - Multi‑seed runner: see `data/util/README.md` for `run_multi_seed.py` (aggregate metrics across seeds).
 - Data cleaner: see `data/util/README.md` for `clear_data.py` (remove `.csv`/`.png` under `data/`).
- - Optimizer core + CLI:
-   - Core library at `data/util/optimizer_core.py` encapsulates trial running, metrics parsing, persistent state (`data/mcp_state/`).
-   - CLI wrapper `data/util/optimizerctl.py` provides:
-     - Validate params: `python data/util/optimizerctl.py validate --params params.json`
-     - Run trial (fast): `python data/util/optimizerctl.py run --params params.json --tag testA`
-     - Run full: `python data/util/optimizerctl.py run --params params.json --full --timeout-minutes 240`
-     - List top: `python data/util/optimizerctl.py list --top 10`
-     - Best summary: `python data/util/optimizerctl.py best`
-     - Pin best: `python data/util/optimizerctl.py pin <trial_id>`
-   - Artifacts and state are stored under `data/mcp_state/` and standard `data/metrics|trades|graphs` folders.
+- Optimizer core + CLI:
+  - Core library at `data/util/optimizer_core.py` encapsulates trial running, metrics parsing, persistent state (`data/mcp_state/`).
+  - CLI wrapper `data/util/optimizerctl.py` provides:
+    - Validate params: `python data/util/optimizerctl.py validate --params params.json`
+    - Run trial (fast): `python data/util/optimizerctl.py run --params params.json --tag testA`
+    - Run full: `python data/util/optimizerctl.py run --params params.json --full --timeout-minutes 240`
+    - List top: `python data/util/optimizerctl.py list --top 10`
+    - Best summary: `python data/util/optimizerctl.py best`
+    - Pin best: `python data/util/optimizerctl.py pin <trial_id>`
+  - Artifacts and state are stored under `data/mcp_state/` and standard `data/metrics|trades|graphs` folders.
 
 **MCP Server (fasmcp/fastmcp)**
 - Implemented with FastMCP 2.x (PyPI: `fastmcp`). Entry: `data/util/mcp_optimizer_server.py`.
@@ -117,6 +117,8 @@ Notes on TA‑Lib
   - `mcp://optimizer/trial/{trial_id}/metrics`
 - Tools:
   - `optimizer_run_trial(params, tag?, fast_mode?, timeout_minutes?)`
+  - `optimizer_start_trial(params, tag?, fast_mode?, timeout_minutes?)` — starts asynchronously and returns `trial_id`
+  - `optimizer_poll_trial(trial_id)` — returns `{status: running}` or `{status: done, result: {...}}`
   - `optimizer_validate_params(params)`
   - `optimizer_list_trials(top?)`
   - `optimizer_get_best()`
@@ -126,6 +128,17 @@ Notes on TA‑Lib
   - `uv run data/util/mcp_optimizer_server.py`
   - Or `python data/util/mcp_optimizer_server.py`
 - Point your LLM agent to the stdio server as an MCP endpoint.
+
+Async usage notes
+- Long‑running HTTP calls may time out in connectors. Prefer the async pair:
+  - Start: `optimizer_start_trial({...})` → `{status: "started", trial_id}` immediately.
+  - Poll: `optimizer_poll_trial({trial_id})` until `{status: "done", result}`.
+- Status/result files persist under `data/mcp_state/trials/<trial_id>/`:
+  - `status.json` — `running` → final status (`ok`, `exit_<code>`, `timeout`)
+  - `result.json` — full result dict (metrics, artifacts, paths)
+  - `metrics.json` — parsed metrics
+  - `config.json` — command and normalized params
+  This allows polling to survive server restarts.
 
 **File Map**
 - `adaptation.py` — environment, training/evaluation pipeline, caching
