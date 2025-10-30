@@ -101,13 +101,26 @@ def _parse_metrics(text: str) -> Dict[str, Any]:
     return m
 
 
+def _safe_float(v: Any) -> float:
+    try:
+        if v is None:
+            return float("nan")
+        if isinstance(v, str):
+            s = v.strip()
+            if s == "" or s.lower() in ("none", "null"):
+                return float("nan")
+            return float(s)
+        return float(v)
+    except Exception:
+        return float("nan")
+
+
 def _rank_key(row: Dict[str, Any]) -> Tuple:
     # Higher sharpe, then total return; lower drawdown
-    return (
-        float(row.get("sharpe", float("nan"))),
-        float(row.get("ret_total_pct", float("nan"))),
-        -float(row.get("max_drawdown_pct", float("nan"))),
-    )
+    sharpe = _safe_float(row.get("sharpe"))
+    ret = _safe_float(row.get("ret_total_pct"))
+    dd = _safe_float(row.get("max_drawdown_pct"))
+    return (sharpe, ret, -dd)
 
 
 def _snapshot_outputs() -> set[Path]:

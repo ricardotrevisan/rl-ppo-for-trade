@@ -6,6 +6,7 @@ from typing import Optional
 from pathlib import Path
 
 from fastmcp import FastMCP
+import math
 
 # Reuse optimizer core helpers
 HERE = Path(__file__).resolve().parent
@@ -15,6 +16,19 @@ import optimizer_core as core  # type: ignore
 
 
 mcp = FastMCP("optimizer")
+
+
+def _sanitize(obj):
+    """Recursively replace NaN/inf with None for JSON compliance."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
 
 
 # Resources
@@ -50,7 +64,8 @@ def optimizer_run_trial(
     timeout_minutes: int = 180,
 ) -> dict:
     """Run adaptation.py with params and return metrics/artifacts."""
-    return core.run_trial(params, tag=tag, fast_mode=fast_mode, timeout_minutes=timeout_minutes)
+    res = core.run_trial(params, tag=tag, fast_mode=fast_mode, timeout_minutes=timeout_minutes)
+    return _sanitize(res)
 
 
 @mcp.tool()
@@ -66,13 +81,13 @@ def optimizer_validate_params(params: dict) -> dict:
 @mcp.tool()
 def optimizer_list_trials(top: Optional[int] = None) -> dict:
     """List trials sorted by objective."""
-    return {"trials": core.list_trials(limit=top)}
+    return _sanitize({"trials": core.list_trials(limit=top)})
 
 
 @mcp.tool()
 def optimizer_get_best() -> dict:
     """Get current best trial summary."""
-    return {"best": core.get_best()}
+    return _sanitize({"best": core.get_best()})
 
 
 @mcp.tool()
@@ -83,4 +98,3 @@ def optimizer_pin_best(trial_id: str) -> dict:
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="0.0.0.0", port=8008)
-
