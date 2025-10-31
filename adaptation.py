@@ -11,6 +11,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 import talib
+from featureset import Ohlcv, precompute_with_cache
 import torch
 import os
 import random
@@ -103,11 +104,39 @@ class TradingEnv(gym.Env):
             )
         self.timestamps = cleaned.index  # timestamps reais do yfinance
         self.prices = cleaned.values
+        # Tentar capturar OHLCV para indicadores adicionais
+        def _find_col(df: pd.DataFrame, base: str) -> str | None:
+            variants = [
+                base, base.title(), base.upper(),
+                f'{ticker}_{base}', f'{ticker}_{base.title()}', f'{ticker}_{base.upper()}',
+                f'{base}_{ticker}', f'{base.title()}_{ticker}', f'{base.upper()}_{ticker}',
+            ]
+            for v in variants:
+                if v in df.columns:
+                    return v
+            return None
+        try:
+            c_close = _find_col(data, 'Close') or price_col
+            c_high = _find_col(data, 'High')
+            c_low = _find_col(data, 'Low')
+            c_vol = _find_col(data, 'Volume')
+            self.close = pd.to_numeric(data[c_close], errors='coerce').to_numpy() if c_close in data.columns else self.prices
+            self.high = pd.to_numeric(data[c_high], errors='coerce').to_numpy() if c_high in data.columns else None
+            self.low = pd.to_numeric(data[c_low], errors='coerce').to_numpy() if c_low in data.columns else None
+            self.volume = pd.to_numeric(data[c_vol], errors='coerce').to_numpy() if c_vol in data.columns else None
+        except Exception:
+            self.close = self.prices
+            self.high = None
+            self.low = None
+            self.volume = None
         self.returns = np.diff(self.prices) / self.prices[:-1]
         # Parâmetros do ambiente
         self.window_size = max(20, int(window_size))  # garantir janela suficiente para SMA/RSI
         self.lot_size = int(lot_size)
         self.ticker = ticker
+        # Guardar datas para rotular caches de indicadores
+        self._start_label = str(start)
+        self._end_label = str(end)
         self.starting_cash = float(starting_cash)
         self.max_trade_fraction = float(max_trade_fraction)
         self.transaction_fee_rate = float(transaction_fee_rate)
@@ -124,13 +153,53 @@ class TradingEnv(gym.Env):
 
         # Espaços do ambiente
         self.action_space = spaces.Discrete(3)  # 0=Hold, 1=Buy, 2=Sell
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
+        # Observation features (9):
+        # stoch_diff, roll_std, atr14_norm, adx14, macd_hist, roc5, ret_z, rsi14, ema_ratio
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
         self.trades = []
+        # Pré-computar indicadores usados em observação e recompensa
+        self._precompute_indicators()
         self.reset()
+
+    def _indicator_cache_path(self) -> str:
+        os.makedirs(os.path.join("data", "indicators"), exist_ok=True)
+        safe_ticker = self.ticker.replace(":", "_").replace("/", "_")
+        fname = f"{safe_ticker}_{self._start_label}_{self._end_label}_w{self.window_size}.npz"
+        return os.path.join("data", "indicators", fname)
+
+    def _precompute_indicators(self) -> None:
+        ohlcv = Ohlcv(
+            prices=self.prices,
+            returns=self.returns,
+            close=self.close if self.close is not None else self.prices,
+            high=self.high,
+            low=self.low,
+            volume=self.volume,
+        )
+        feats = precompute_with_cache(
+            ticker=self.ticker,
+            start=self._start_label,
+            end=self._end_label,
+            ohlcv=ohlcv,
+            window_size=self.window_size,
+        )
+        self.sma5 = feats["sma5"]
+        self.sma20 = feats["sma20"]
+        self.rsi14 = feats["rsi14"]
+        self.ema12 = feats["ema12"]
+        self.ema26 = feats["ema26"]
+        self.macd_hist = feats["macd_hist"]
+        self.roc5 = feats["roc5"]
+        self.roc20 = feats["roc20"]
+        self.roll_std = feats["roll_std"]
+        self.atr14_norm = feats["atr14_norm"]
+        self.stoch_diff = feats["stoch_diff"]
+        self.adx14 = feats["adx14"]
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.current_step = self.window_size
+        # Start after all feature lookbacks are available (MACD/EMA26/ADX need warmup)
+        self.current_step = max(self.window_size, 35)
         self.balance = float(self.starting_cash)
         self.shares = 0
         self.prev_portfolio_value = float(self.starting_cash)
@@ -141,24 +210,31 @@ class TradingEnv(gym.Env):
         return self._get_obs(), {}
 
     def _get_obs(self):
-        start = self.current_step - self.window_size
-        end = self.current_step
-        prices = self.prices[start:end+1]
-        returns = self.returns[start:end]
+        k = self.current_step
+        # indicadores pré-computados alinhados em k
+        rsi = float(self.rsi14[k])
+        vol = float(self.roll_std[k]) if k < len(self.roll_std) else np.nan
+        ema12 = float(self.ema12[k]) if hasattr(self, "ema12") else np.nan
+        ema26 = float(self.ema26[k]) if hasattr(self, "ema26") else np.nan
+        ema_ratio = (ema12 / (ema26 + 1e-8)) - 1.0
+        macd_h = float(self.macd_hist[k]) if hasattr(self, "macd_hist") else np.nan
+        roc5 = float(self.roc5[k]) if hasattr(self, "roc5") else np.nan
+        atrn = float(self.atr14_norm[k]) if hasattr(self, "atr14_norm") else np.nan
+        stochd = float(self.stoch_diff[k]) if hasattr(self, "stoch_diff") else np.nan
+        adx = float(self.adx14[k]) if hasattr(self, "adx14") else np.nan
+        ret_z = float(self.ret_z[k]) if hasattr(self, "ret_z") else np.nan
 
-        sma5 = talib.SMA(prices, timeperiod=5)[-1]
-        sma20 = talib.SMA(prices, timeperiod=20)[-1]
-        rsi = talib.RSI(prices, timeperiod=14)[-1]
-        vol = np.std(returns)
-
-        # Sem escalas manuais: deixar VecNormalize aprender os scalers
+        # Ordem: stoch_diff, roll_std, atr14_norm, adx14, macd_hist, roc5, ret_z, rsi14, ema_ratio
         obs = np.array([
-            self.balance,
-            float(self.shares),
-            prices[-1] / prices[0] - 1.0,
-            (sma5 / sma20) - 1.0,
-            rsi,  # em pontos 0-100
-            vol
+            stochd,
+            vol,
+            atrn,
+            adx,
+            macd_h,
+            roc5,
+            ret_z,
+            rsi,
+            ema_ratio,
         ], dtype=np.float32)
         return np.nan_to_num(obs, nan=0.0)
 
@@ -230,13 +306,10 @@ class TradingEnv(gym.Env):
         traded_value = abs(qty) * current_price
         turnover = traded_value / (equity_before + 1e-8)
 
-        # Momentum (sma5 vs sma20) and inventory fraction
-        w_start = max(0, self.current_step - self.window_size)
-        w_end = self.current_step
-        w_prices = self.prices[w_start:w_end+1]
-        sma5 = talib.SMA(w_prices, timeperiod=5)[-1]
-        sma20 = talib.SMA(w_prices, timeperiod=20)[-1]
-        mom_ratio = float((sma5 / (sma20 + 1e-8)) - 1.0)
+        # Momentum (sma5 vs sma20) and inventory fraction (usar pré-computados)
+        sma5_k = float(self.sma5[self.current_step])
+        sma20_k = float(self.sma20[self.current_step])
+        mom_ratio = float((sma5_k / (sma20_k + 1e-8)) - 1.0)
         neg_mom = max(0.0, -mom_ratio)
         pos_frac = (self.shares * current_price) / (equity_before + 1e-8)
 
