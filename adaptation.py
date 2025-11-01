@@ -19,6 +19,9 @@ import warnings
 from datetime import datetime, timedelta
 import argparse
 import json
+import csv
+import time
+import csv
 warnings.filterwarnings("ignore")
 import multiprocessing as mp
 try:
@@ -120,12 +123,12 @@ class TradingEnv(gym.Env):
             c_high = _find_col(data, 'High')
             c_low = _find_col(data, 'Low')
             c_vol = _find_col(data, 'Volume')
-            self.close = pd.to_numeric(data[c_close], errors='coerce').to_numpy() if c_close in data.columns else self.prices
+            self.close_prices = pd.to_numeric(data[c_close], errors='coerce').to_numpy() if c_close in data.columns else self.prices
             self.high = pd.to_numeric(data[c_high], errors='coerce').to_numpy() if c_high in data.columns else None
             self.low = pd.to_numeric(data[c_low], errors='coerce').to_numpy() if c_low in data.columns else None
             self.volume = pd.to_numeric(data[c_vol], errors='coerce').to_numpy() if c_vol in data.columns else None
         except Exception:
-            self.close = self.prices
+            self.close_prices = self.prices
             self.high = None
             self.low = None
             self.volume = None
@@ -171,7 +174,7 @@ class TradingEnv(gym.Env):
         ohlcv = Ohlcv(
             prices=self.prices,
             returns=self.returns,
-            close=self.close if self.close is not None else self.prices,
+            close=self.close_prices if self.close_prices is not None else self.prices,
             high=self.high,
             low=self.low,
             volume=self.volume,
@@ -412,7 +415,19 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for future rewards (0-1)")
     parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda parameter (0-1)")
     # Non-interactive mode
-    parser.add_argument("--mode", choices=["train", "eval"], help="Run mode without prompt: train or eval")
+    parser.add_argument("--mode", choices=["train", "eval", "sweep", "retrain_best"], help="Run mode without prompt: train, eval, sweep or retrain_best")
+    parser.add_argument("--net-arch", type=str, help="Comma-separated hidden sizes for policy MLP, e.g. 128,128")
+    # Sweep knobs (stdout only)
+    parser.add_argument("--sweep-trials", type=int, default=24, help="Number of random trials for sweep")
+    parser.add_argument("--sweep-short-steps", type=int, default=120_000, help="Short training timesteps per trial")
+    parser.add_argument("--sweep-seeds", type=int, default=2, help="Seeds averaged per trial")
+    parser.add_argument("--sweep-min-improve", type=float, default=0.05, help="Early stop: min Sharpe improvement threshold")
+    parser.add_argument("--sweep-patience", type=int, default=8, help="Early stop: number of trials without improvement")
+    parser.add_argument("--sweep-exploit", action="store_true", help="Exploit mode: fix discrete knobs to current args and narrow LR around center")
+    parser.add_argument("--sweep-center-lr", type=float, help="Center learning rate for exploit mode (if unset, uses --learning-rate)")
+    parser.add_argument("--sweep-lr-span", type=float, default=0.3, help="Relative span around center LR for exploit (e.g., 0.3 => center*(1±0.3))")
+    # Retrain from best sweep JSON
+    parser.add_argument("--retrain-best-path", type=str, help="Path to sweep_best_*.json. If omitted, uses the latest in data/metrics/")
     # Reproducibility / performance knobs
     parser.add_argument("--seed", type=int, default=42, help="Base random seed for training/eval")
     parser.add_argument("--num-envs", type=int, default=8, help="Number of parallel envs for training")
@@ -568,6 +583,16 @@ def main():
         except Exception:
             pass
         print(f"Parallel envs: {n_envs}")
+        # Net-arch parsing (train)
+        net_arch = None
+        if getattr(args, "net_arch", None):
+            try:
+                net_arch = [int(x.strip()) for x in str(args.net_arch).split(",") if x.strip()]
+            except Exception:
+                net_arch = None
+        if not net_arch:
+            net_arch = [256, 256]
+
         algorithms = {
             "PPO": PPO(
                 "MlpPolicy",
@@ -578,7 +603,7 @@ def main():
                 n_steps=int(args.n_steps),  # per env; total = n_steps * n_envs
                 batch_size=int(args.batch_size),
                 n_epochs=int(args.n_epochs),
-                policy_kwargs={"net_arch": [256, 256]},
+                policy_kwargs={"net_arch": net_arch},
                 ent_coef=float(args.ent_coef),
                 clip_range=float(args.clip_range),
                 gamma=float(args.gamma),
@@ -599,6 +624,374 @@ def main():
         best_model.save(f"best_trading_model_{best_name}.zip")
         vec_env.save("vec_normalize.pkl")
         print(f"\n✓ Melhor modelo salvo: best_trading_model_{best_name}.zip")
+    elif mode == "retrain_best":
+        # Load best config JSON and retrain long with those params
+        print("\n" + "=" * 60)
+        print("Recarregando melhor configuração do sweep e treinando longo...")
+        # Resolve path
+        best_path = args.retrain_best_path
+        if not best_path:
+            try:
+                dm = os.path.join("data", "metrics")
+                candidates = [
+                    os.path.join(dm, f) for f in os.listdir(dm)
+                    if f.startswith("sweep_best_") and f.endswith(".json")
+                ]
+                if not candidates:
+                    raise FileNotFoundError("Nenhum sweep_best_*.json encontrado em data/metrics/")
+                best_path = max(candidates, key=lambda p: os.path.getmtime(p))
+            except Exception as e:
+                raise SystemExit(f"Falha ao localizar sweep_best JSON: {e}")
+        with open(best_path, "r") as fh:
+            best_blob = json.load(fh)
+        cfg = best_blob.get("cfg", {})
+        print(f"✓ Usando melhor configuração de {best_path}:\n{json.dumps(cfg, indent=2)}")
+
+        # Prepare training env with cfg env knobs
+        train_csv = get_cached_data("PETR4.SA", args.train_start, args.train_end)
+        def make_env_retrain():
+            def _thunk():
+                e = TradingEnv(
+                    ticker="PETR4.SA",
+                    start=args.train_start,
+                    end=args.train_end,
+                    csv_path=train_csv,
+                    window_size=args.window_size,
+                    reward_mode=args.reward_mode,
+                    lot_size=int(args.lot_size),
+                    max_trade_fraction=float(args.max_trade_fraction),
+                    risk_window=int(cfg.get("risk_window", args.risk_window)),
+                    downside_only=bool(cfg.get("downside_only", args.downside_only)),
+                    dd_penalty=float(cfg.get("dd_penalty", args.dd_penalty)),
+                    turnover_penalty=0.0,
+                    loss_penalty=args.loss_penalty,
+                    inv_mom_penalty=float(cfg.get("inv_mom_penalty", getattr(args, "inv_mom_penalty", 0.0))),
+                    sell_turnover_factor=args.sell_turnover_factor,
+                    starting_cash=100_000.0,
+                )
+                return Monitor(e)
+            return _thunk
+        n_envs = max(1, int(args.num_envs))
+        if args.deterministic or n_envs == 1:
+            vec_env = DummyVecEnv([make_env_retrain()])
+        else:
+            vec_env = SubprocVecEnv([make_env_retrain() for _ in range(n_envs)])
+        vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
+
+        # Net-arch: from cfg if present, else CLI, else default
+        net_arch = cfg.get("net_arch")
+        if getattr(args, "net_arch", None):
+            try:
+                net_arch = [int(x.strip()) for x in str(args.net_arch).split(",") if x.strip()]
+            except Exception:
+                pass
+        if not net_arch:
+            net_arch = [256, 256]
+
+        model = PPO(
+            "MlpPolicy",
+            vec_env,
+            device=device,
+            verbose=0,
+            learning_rate=float(cfg.get("learning_rate", args.learning_rate)),
+            n_steps=int(cfg.get("n_steps", args.n_steps)),
+            batch_size=int(cfg.get("batch_size", args.batch_size)),
+            n_epochs=int(cfg.get("n_epochs", args.n_epochs)),
+            policy_kwargs={"net_arch": net_arch},
+            ent_coef=float(cfg.get("ent_coef", args.ent_coef)),
+            clip_range=float(cfg.get("clip_range", args.clip_range)),
+            gamma=float(cfg.get("gamma", args.gamma)),
+            gae_lambda=float(cfg.get("gae_lambda", args.gae_lambda)),
+            seed=args.seed,
+        )
+        total_steps = int(args.total_timesteps)
+        print(f"Treinando por {total_steps} timesteps no dispositivo {device}...")
+        model.learn(total_timesteps=total_steps, progress_bar=True)
+        model.save(f"best_trading_model_PPO.zip")
+        vec_env.save("vec_normalize.pkl")
+        print("✓ Modelo reentreinado salvo como best_trading_model_PPO.zip e vec_normalize.pkl")
+        # Prepare for downstream evaluation
+        best_model = model
+        best_name = "PPO"
+    elif mode == "sweep":
+        # Simple random sweep over PPO and env knobs, stdout only
+        print("\n" + "=" * 60)
+        print("Iniciando sweep de hiperparâmetros (stdout apenas)...")
+        train_csv = get_cached_data("PETR4.SA", args.train_start, args.train_end)
+        os.makedirs(os.path.join("data", "metrics"), exist_ok=True)
+        sweep_csv = os.path.join("data", "metrics", f"sweep_results_{today}.csv")
+        # Prepare CSV header if new file
+        if not os.path.exists(sweep_csv):
+            with open(sweep_csv, "w", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow([
+                    "run_ts", "device", "trial", "mean_sharpe", "seeds", "seed_sharpes", "trial_wall_time_sec", "sweep_elapsed_sec",
+                    "learning_rate", "n_steps", "batch_size", "n_epochs",
+                    "ent_coef", "clip_range", "gamma", "gae_lambda",
+                    "net_arch", "risk_window", "downside_only", "dd_penalty", "inv_mom_penalty"
+                ])
+
+        # Candidate grids
+        LR = [1e-4, 3e-4]
+        N_STEPS = [1024, 2048]
+        BATCH = [4096, 8192]
+        EPOCHS = [5, 10]
+        ENT = [0.0, 0.005, 0.01]
+        CLIP = [0.1, 0.2, 0.3]
+        GAMMA = [0.95, 0.99]
+        LAMBDA = [0.90, 0.95, 0.98]
+        ARCH = [[128, 128], [256, 256]]
+        RISK_WIN = [10, 20, 40]
+        DOWNSIDE = [False, True]
+        DD_PEN = [0.02, 0.05, 0.10]
+        INV_MOM = [0.0, 0.01, 0.02]
+
+        # Controlled sampling helpers
+        def lhs_points(n: int, seed: int):
+            rng = random.Random(seed)
+            bins = list(range(n))
+            rng.shuffle(bins)
+            xs = []
+            for b in bins:
+                xs.append((b + rng.random()) / n)
+            return xs
+
+        def map_log_uniform(u: float, low: float, high: float) -> float:
+            import math
+            lo, hi = math.log(low), math.log(high)
+            return float(math.exp(lo + u * (hi - lo)))
+
+        lhs_lr = lhs_points(int(args.sweep_trials), seed=args.seed * 1237 + 17)
+
+        def balanced_pick(lst, trial_idx: int, seed_off: int):
+            rng = random.Random(args.seed * 97 + seed_off)
+            perm = list(lst)
+            rng.shuffle(perm)
+            return perm[trial_idx % len(perm)]
+
+        def sample_cfg(trial_idx: int):
+            # Continuous: learning rate (explore vs exploit)
+            if args.sweep_exploit:
+                center = float(args.sweep_center_lr) if args.sweep_center_lr else float(args.learning_rate)
+                span = float(args.sweep_lr_span)
+                lo, hi = max(1e-6, center * (1 - span)), center * (1 + span)
+                lr = map_log_uniform(lhs_lr[trial_idx - 1], lo, hi)
+            else:
+                lr = map_log_uniform(lhs_lr[trial_idx - 1], 1e-4, 3e-4)
+            n_steps = balanced_pick(N_STEPS, trial_idx, 11)
+            batch = balanced_pick(BATCH, trial_idx, 13)
+            n_envs_eff = max(1, int(args.num_envs))
+            if batch % n_envs_eff != 0 or batch > n_steps * n_envs_eff:
+                for b in BATCH:
+                    if b % n_envs_eff == 0 and b <= n_steps * n_envs_eff:
+                        batch = b
+                        break
+            cfg = {
+                "learning_rate": lr,
+                "n_steps": n_steps if not args.sweep_exploit else int(args.n_steps),
+                "batch_size": batch if not args.sweep_exploit else int(args.batch_size),
+                "n_epochs": balanced_pick(EPOCHS, trial_idx, 17) if not args.sweep_exploit else int(args.n_epochs),
+                "ent_coef": balanced_pick(ENT, trial_idx, 19),
+                "clip_range": balanced_pick(CLIP, trial_idx, 23) if not args.sweep_exploit else float(args.clip_range),
+                "gamma": balanced_pick(GAMMA, trial_idx, 29) if not args.sweep_exploit else float(args.gamma),
+                "gae_lambda": balanced_pick(LAMBDA, trial_idx, 31) if not args.sweep_exploit else float(args.gae_lambda),
+                "net_arch": balanced_pick(ARCH, trial_idx, 37),
+                "risk_window": balanced_pick(RISK_WIN, trial_idx, 41) if not args.sweep_exploit else int(args.risk_window),
+                "downside_only": balanced_pick(DOWNSIDE, trial_idx, 43) if not args.sweep_exploit else bool(args.downside_only),
+                "dd_penalty": balanced_pick(DD_PEN, trial_idx, 47) if not args.sweep_exploit else float(args.dd_penalty),
+                "inv_mom_penalty": random.choice(INV_MOM) if not args.sweep_exploit else (float(args.inv_mom_penalty) if hasattr(args, "inv_mom_penalty") else 0.01),
+            }
+            # Fix net_arch in exploit if provided
+            if args.sweep_exploit and getattr(args, "net_arch", None):
+                try:
+                    cfg["net_arch"] = [int(x.strip()) for x in str(args.net_arch).split(",") if x.strip()]
+                except Exception:
+                    pass
+            return cfg
+
+        def make_env_slice(csv_path):
+            def _thunk():
+                e = TradingEnv(
+                    ticker="PETR4.SA",
+                    start=args.train_start,
+                    end=args.train_end,
+                    csv_path=csv_path,
+                    window_size=args.window_size,
+                    reward_mode=args.reward_mode,
+                    lot_size=int(args.lot_size),
+                    max_trade_fraction=float(args.max_trade_fraction),
+                    risk_window=cfg["risk_window"],
+                    downside_only=cfg["downside_only"],
+                    dd_penalty=cfg["dd_penalty"],
+                    turnover_penalty=0.0,
+                    loss_penalty=args.loss_penalty,
+                    inv_mom_penalty=cfg.get("inv_mom_penalty", 0.0),
+                    sell_turnover_factor=args.sell_turnover_factor,
+                    starting_cash=100_000.0,
+                )
+                return Monitor(e)
+            return _thunk
+
+        def eval_sharpe(model, vec_norm, start_date: str, end_date: str) -> float:
+            test_csv = get_cached_data("PETR4.SA", start_date, end_date)
+            eval_env = TradingEnv(
+                ticker="PETR4.SA",
+                start=start_date,
+                end=end_date,
+                csv_path=test_csv,
+                window_size=args.window_size,
+                reward_mode=args.reward_mode,
+                lot_size=int(args.lot_size),
+                max_trade_fraction=float(args.max_trade_fraction),
+                risk_window=cfg["risk_window"],
+                downside_only=cfg["downside_only"],
+                dd_penalty=cfg["dd_penalty"],
+                turnover_penalty=0.0,
+                loss_penalty=args.loss_penalty,
+                inv_mom_penalty=cfg.get("inv_mom_penalty", 0.0),
+                sell_turnover_factor=args.sell_turnover_factor,
+                starting_cash=100_000.0,
+            )
+            base_eval_env = Monitor(eval_env)
+            from stable_baselines3.common.vec_env import DummyVecEnv
+            eval_vec = DummyVecEnv([lambda: base_eval_env])
+            from stable_baselines3.common.vec_env import VecNormalize
+            eval_vec = VecNormalize(eval_vec, training=False, norm_obs=True, norm_reward=False)
+            # Copy normalization stats from training
+            try:
+                eval_vec.obs_rms = vec_norm.obs_rms
+            except Exception:
+                pass
+            obs = eval_vec.reset()
+            done = False
+            port_vals = [float(eval_env.starting_cash)]
+            while not done:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, _, dones, infos = eval_vec.step(action)
+                info = infos[0] if isinstance(infos, (list, tuple)) else infos
+                port_vals.append(info.get("portfolio", port_vals[-1]))
+                done = dones[0] if isinstance(dones, (list, tuple, np.ndarray)) else dones
+            pv = np.array(port_vals, dtype=float)
+            rets = np.diff(pv) / pv[:-1]
+            std = np.std(rets)
+            if std <= 1e-12:
+                return float("nan")
+            sharpe = (np.mean(rets) / std) * np.sqrt(252)
+            return float(sharpe)
+
+        best = None
+        best_trial = None
+        since_improve = 0
+        sweep_t0 = time.monotonic()
+        for t in range(1, int(args.sweep_trials) + 1):
+            t0 = time.monotonic()
+            cfg = sample_cfg(t)
+            seed_list = [args.seed + i for i in range(int(args.sweep_seeds))]
+            sharps = []
+            for s in seed_list:
+                # Seed
+                os.environ["PYTHONHASHSEED"] = str(s)
+                random.seed(s)
+                np.random.seed(s)
+                torch.manual_seed(s)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(s)
+
+                # Vec env for training
+                n_envs = max(1, int(args.num_envs))
+                if args.deterministic or n_envs == 1:
+                    vec_env = DummyVecEnv([make_env_slice(train_csv)])
+                else:
+                    vec_env = SubprocVecEnv([make_env_slice(train_csv) for _ in range(n_envs)])
+                vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
+
+                model = PPO(
+                    "MlpPolicy",
+                    vec_env,
+                    device=device,
+                    verbose=0,
+                    learning_rate=cfg["learning_rate"],
+                    n_steps=cfg["n_steps"],
+                    batch_size=cfg["batch_size"],
+                    n_epochs=cfg["n_epochs"],
+                    policy_kwargs={"net_arch": cfg["net_arch"]},
+                    ent_coef=cfg["ent_coef"],
+                    clip_range=cfg["clip_range"],
+                    gamma=cfg["gamma"],
+                    gae_lambda=cfg["gae_lambda"],
+                    seed=s,
+                )
+                model.learn(total_timesteps=int(args.sweep_short_steps), progress_bar=False)
+                # Evaluate on validation slice (args.eval_start/end)
+                sh = eval_sharpe(model, vec_env, args.eval_start, args.eval_end)
+                sharps.append(sh)
+                try:
+                    vec_env.close()
+                except Exception:
+                    pass
+            # Seed-averaged Sharpe
+            mean_sh = float(np.nanmean(sharps)) if len(sharps) else float("nan")
+            cfg_print = {
+                k: v for k, v in cfg.items() if k in [
+                    "learning_rate","n_steps","batch_size","n_epochs","ent_coef","clip_range","gamma","gae_lambda","net_arch","risk_window","downside_only","dd_penalty"
+                ]
+            }
+            trial_elapsed = time.monotonic() - t0
+            sweep_elapsed = time.monotonic() - sweep_t0
+            print(f"Trial {t:02d}: Sharpe(mean {args.sweep_seeds} seeds) = {mean_sh:+.3f} | time={trial_elapsed:.1f}s | cfg={cfg_print}")
+            # Persist this trial to CSV
+            try:
+                seed_str = "|".join([f"s{i}:{sharps[i]:+.4f}" for i in range(len(sharps))])
+                with open(sweep_csv, "a", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow([
+                        today,
+                        device,
+                        t,
+                        f"{mean_sh:+.6f}",
+                        len(sharps),
+                        seed_str,
+                        f"{trial_elapsed:.3f}",
+                        f"{sweep_elapsed:.3f}",
+                        cfg_print.get("learning_rate"),
+                        cfg_print.get("n_steps"),
+                        cfg_print.get("batch_size"),
+                        cfg_print.get("n_epochs"),
+                        cfg_print.get("ent_coef"),
+                        cfg_print.get("clip_range"),
+                        cfg_print.get("gamma"),
+                        cfg_print.get("gae_lambda"),
+                        "-".join(map(str, cfg_print.get("net_arch", []))) if isinstance(cfg_print.get("net_arch"), (list, tuple)) else cfg_print.get("net_arch"),
+                        cfg_print.get("risk_window"),
+                        cfg_print.get("downside_only"),
+                        cfg_print.get("dd_penalty"),
+                        cfg.get("inv_mom_penalty"),
+                    ])
+            except Exception as e:
+                print(f"⚠️ Falha ao persistir trial {t} no CSV: {e}")
+            if (best is None) or (mean_sh > best + 1e-12):
+                improvement = (float("-inf") if best is None else (mean_sh - best))
+                best = mean_sh
+                best_trial = {"trial": t, "sharpe": best, "cfg": cfg_print}
+                since_improve = 0
+            else:
+                since_improve += 1
+            if since_improve >= int(args.sweep_patience):
+                # Early stop if no sufficient improvement
+                if best_trial is not None:
+                    print(f"Early stop: no improvement in {args.sweep_patience} trials. Best so far: {best_trial}")
+                break
+        # Persist best config
+        if best_trial is not None:
+            try:
+                best_path = os.path.join("data", "metrics", f"sweep_best_{today}.json")
+                with open(best_path, "w") as fh:
+                    json.dump(best_trial, fh, indent=2)
+                print(f"Melhor configuração salva em {best_path}")
+            except Exception as e:
+                print(f"⚠️ Falha ao salvar melhor configuração: {e}")
+        # Exit after sweep
+        return
     else:
         raise SystemExit("Modo 'eval' selecionado, mas o arquivo best_trading_model_PPO.zip não foi encontrado.")
 

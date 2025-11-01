@@ -1,0 +1,21 @@
+{
+  "trial": 1,
+  "sharpe": 2.88751412955187,
+  "cfg": {
+    "learning_rate": 0.0001,
+    "n_steps": 1024,
+    "batch_size": 8192,
+    "n_epochs": 5,
+    "ent_coef": 0.0,
+    "clip_range": 0.1,
+    "gamma": 0.95,
+    "gae_lambda": 0.98,
+    "net_arch": [
+      128,
+      128
+    ],
+    "risk_window": 40,
+    "downside_only": true,
+    "dd_penalty": 0.02
+  }
+}

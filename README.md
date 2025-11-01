@@ -15,6 +15,18 @@
 - PPO training (Stable‑Baselines3), with GPU support and parallel envs for speed.
 - Simple, scriptable CLI: train/eval modes, core knobs exposed, and utilities for multi‑seed runs and data cleanup.
 
+**Centralized Indicators**
+- Single source for indicators in `featureset.py` with on‑disk cache under `data/indicators/`.
+- Precomputed per date range to avoid recomputation across workers/runs.
+- Implemented indicators:
+  - Trend/momentum: `SMA5/20`, `EMA12/26`, `MACD_hist`, `ROC5`
+  - Oscillators/regime: `RSI14`, `StochK−D`, `ADX14`
+  - Volatility: rolling std of returns over window, `ATR14/price`
+  - Derived: return z‑score (`ret_z`), interaction `stoch_adx = stoch_diff * (adx14/100)`
+- Active observation features (9), in order:
+  - `stoch_diff`, `roll_std`, `atr14_norm`, `adx14`, `macd_hist`, `roc5`, `ret_z`, `rsi14`, `ema_ratio`
+- Warm‑up: episodes start at `max(window_size, 35)` so all lookbacks are valid.
+
 **Data Handling**
 - On first run, the script caches Yahoo Finance OHLCV to CSV under `data/` so multiple workers don’t re‑download.
 - Cache files:
@@ -68,8 +80,28 @@ Notes on TA‑Lib
   - Reward base: `--reward-mode {log,risk_adj}` and `--risk-window` (default 20)
   - Trading behavior: `--max-trade-fraction` (default 0.10), `--lot-size` (default 100)
   - Speed/repro: `--num-envs 8` (faster) or `--num-envs 1 --deterministic` (reproducible)
- - Print all used params to terminal:
-   - Add `--print-params` to any command to dump the full run configuration (CLI args plus derived settings like device and effective env count).
+- Print all used params to terminal:
+  - Add `--print-params` to any command to dump the full run configuration (CLI args plus derived settings like device and effective env count).
+
+**Hyperparameter Sweep (Stdout + CSV)**
+- Random sweep mode to maximize validation Sharpe with short trainings and early stop.
+- Run:
+  - `uv run adaptation.py --mode sweep --train-start 2022-01-01 --train-end 2023-01-01 --eval-start 2023-01-02 --eval-end 2023-12-31 --sweep-trials 32 --sweep-seeds 2`
+- Persists every trial to CSV: `data/metrics/sweep_results_<timestamp>.csv` with:
+  - `run_ts`, `device`, `trial`, `mean_sharpe`, `seeds`, `seed_sharpes`, `trial_wall_time_sec`, `sweep_elapsed_sec`
+  - PPO/env params: `learning_rate`, `n_steps`, `batch_size`, `n_epochs`, `ent_coef`, `clip_range`, `gamma`, `gae_lambda`, `net_arch`, `risk_window`, `downside_only`, `dd_penalty`
+- Saves best config JSON to `data/metrics/sweep_best_<timestamp>.json`.
+
+**Offline Feature Report (Stdout Only)**
+- Consistent with training features via `featureset.compute_feature_frame`.
+- Run:
+  - `uv run features_report.py --ticker PETR4.SA --start 2022-01-01 --end 2023-01-01 --window-size 20`
+- Prints:
+  - Non‑null coverage per feature
+  - High‑correlation pairs (Pearson) for redundancy pruning
+  - Information Coefficient (Spearman with next return), overall and by splits
+  - PCA summary (explained variance, top loadings) for redundancy diagnostics
+  - Suggested de‑correlated subset (cap ~12 features)
 
 **Outputs**
 - Metrics: CSVs under `data/metrics/` (portfolio, returns, drawdown by run/slice)

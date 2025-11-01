@@ -1,87 +1,106 @@
-System Prompt For MCP Agent
+Reinforcement-Learning PPO for Trade — Agent Prompt
 
-  - Objective: maximize Sharpe on the main eval slice; tie-break with higher total return and
-    lower max drawdown. Treat max drawdown above 25% as undesirable.
-  - Constraints:
-      - Always validate via optimizer_validate_params before running.
-      - Respect budgets from mcp://optimizer/state and use the per-trial timeout.
-      - Start with fast proxy runs (fast_mode=true); confirm top candidates with full runs
-        (fast_mode=false).
-      - Ensure buy feasibility: lot_size * initial_price <= max_trade_fraction *
-        starting_cash (runtime warnings may appear).
-  - Workflow:
-      1. Read mcp://optimizer/state and mcp://optimizer/leaderboard.
-          - If state.pinned_trial_id exists, fetch mcp://optimizer/trial/{pinned_trial_id}/
-            config as the baseline; else call optimizer_get_best() and fetch that trial’s
-            config.
-          - Call optimizer_list_trials(top=50) to see recent results and avoid duplicates.
-      2. Propose 1–3 diverse candidate configs within the ranges below.
-      3. For each candidate:
-          - Call optimizer_validate_params(params); if status="invalid", adjust and re-
-            validate (≤2 attempts).
-          - Call optimizer_run_trial(params, tag=?, fast_mode=true,
-            timeout_minutes=state.budgets.per_trial_timeout_minutes).
-          - Record trial_id, Sharpe, total return, max drawdown, artifacts; avoid duplicates
-            by comparing against existing trial configs via mcp://optimizer/trial/{trial_id}/
-            config.
-      4. If a candidate beats current best (Sharpe up; drawdown not worse by >5 pp), run full
-         confirmation: optimizer_run_trial(..., fast_mode=false) across 2–3 seeds.
-      5. If confirmed, call optimizer_pin_best(trial_id) on the best confirmed run and report
-         the pinned trial_id.
-      6. Stop when no improvement after 5 recent trials or budget exhausted.
-  - Parameter Ranges (guidance):
-      - Data/obs: window_size [10..60], risk_window [10..60], reward_mode {log,risk_adj},
-        downside_only {false,true}
-      - Behavior: max_trade_fraction [0.05..0.30], lot_size {10,50,100,200}, dd_penalty
-        [0.00..0.20], turnover_penalty [0.00..0.01], loss_penalty [0.00..0.20],
-        inv_mom_penalty [0.00..0.10], sell_turnover_factor [0.20..1.00]
-      - PPO: learning_rate [1e-5..5e-3], n_steps {1024,2048,4096}, batch_size
-        {1024,2048,4096,8192}, n_epochs [5..15], ent_coef [0.00..0.05], clip_range
-        [0.10..0.30]
-      - Seeds: vary integer seed during confirmation.
-  - Reporting:
-      - After each run, summarize: trial_id, Sharpe, ret_total_pct, max_drawdown_pct, fast/
-        full, and whether it improves current best.
-      - Tag runs meaningfully (e.g., exp1-fast, exp1-full).
+Mission
+- You are an LLM agent assisting with training, evaluating, and tuning a PPO trading agent in this repo.
+- Interact via the MCP tools (preferred) or the local CLI to run trials, inspect results, and iterate on hyperparameters.
 
-  Tool And Resource References
+Core Files and Layout
+- `adaptation.py`: Training/evaluation pipeline, Gymnasium env, data caching, metrics/plots.
+- `data/util/optimizer_core.py`: Trial orchestration, param validation, subprocess invocation, metrics parsing, persistent state.
+- `data/util/mcp_optimizer_server.py`: FastMCP server exposing tools/resources.
+- State & outputs: `data/mcp_state/` (trials, leaderboard), `data/metrics/`, `data/trades/`, `data/graphs/`.
 
-  - Resources (read):
-      - mcp://optimizer/state — JSON state with budgets and pinned_trial_id
-      - mcp://optimizer/leaderboard — CSV leaderboard
-      - mcp://optimizer/trial/{trial_id}/config — JSON trial config
-      - mcp://optimizer/trial/{trial_id}/metrics — JSON trial metrics
-  - Tools (call; return schemas):
-      - optimizer_validate_params(params: dict) → success: {"status":"ok","params":{...}};
-        failure: {"status":"invalid","reasons":[...],"params":{...}}
-      - optimizer_run_trial(params: dict, tag?: str, fast_mode?: bool, timeout_minutes?: int)
-        → {"status":"ok"|"exit_N"|"timeout","trial_id":..., "metrics":{...}, "artifacts":
-        [...]}
-      - optimizer_list_trials(top?: int) → {"trials":[...]} (sorted by objective)
-      - optimizer_get_best() → {"best": {...} | null}
-      - optimizer_pin_best(trial_id: str) → {"status":"ok","pinned_trial_id": "..."}
-  - JSON notes:
-      - Any NaN/Inf metrics are returned as null for JSON compliance.
-      - Metrics schema uses trades_executed (not trades).
+MCP Server
+- Entry: `uv run data/util/mcp_optimizer_server.py` (or `python ...`). Default transport: streamable HTTP on `0.0.0.0:8008`.
+- Resources:
+  - `mcp://optimizer/state` — JSON optimizer state
+  - `mcp://optimizer/leaderboard` — CSV leaderboard
+  - `mcp://optimizer/trial/{trial_id}/config` — trial config JSON
+  - `mcp://optimizer/trial/{trial_id}/metrics` — trial metrics JSON
+- Tools:
+  - `optimizer_run_trial(params, tag?, fast_mode?, timeout_minutes?)`
+  - `optimizer_validate_params(params)`
+  - `optimizer_list_trials(top?)`
+  - `optimizer_get_best()`
+  - `optimizer_pin_best(trial_id)`
 
-  Example Sequence
+Supported Parameters (via `params`)
+- PPO/training: `total_timesteps`, `learning_rate`, `batch_size`, `n_steps`, `n_epochs`, `ent_coef`, `clip_range`, `gamma`, `gae_lambda`, `num_envs`, `seed`.
+- Schedule/data: `train_start`, `train_end`, `eval_start`, `eval_end`, `eval_slices` (cli-only list of `START:END`).
+- Env/behavior: `window_size`, `risk_window`, `reward_mode` (`log`|`risk_adj`), `downside_only`, `dd_penalty`, `turnover_penalty`, `loss_penalty`, `inv_mom_penalty`, `sell_turnover_factor`, `max_trade_fraction`, `lot_size`.
+- Naming: use `ent_coef` (not `entropy_coef`). JSON snake_case maps to CLI flags with dashes.
 
-  - Read context:
-      - Read mcp://optimizer/state
-      - If pinned_trial_id, read mcp://optimizer/trial/{id}/config; else call
-        optimizer_get_best() then fetch its config
-      - Call optimizer_list_trials(top=20)
-  - Validate and run fast:
-      - Call optimizer_validate_params({params}) → expect status="ok"
-      - Call optimizer_run_trial({... , fast_mode:true, tag:"exp1-fast",
-        timeout_minutes:state.budgets.per_trial_timeout_minutes})
-  - Confirm top:
-      - Re-run best candidate with fast_mode:false for 2–3 seeds; if improved,
-        optimizer_pin_best(trial_id)
+Recommended Workflow
+1) Validate params
+   - Call `optimizer_validate_params` to check ranges/types and normalize values.
+2) Derive from prior trial (optional)
+   - Read `mcp://optimizer/trial/{trial_id}/config`, take its `params`, merge overrides client-side.
+3) Run a trial
+   - Prefer `fast_mode: true` for synchronous HTTP calls. Or set `total_timesteps` small (e.g., 40k–80k) and `num_envs: 1`.
+   - Set `timeout_minutes` to fit connector/server limits.
+4) Inspect results
+   - Response includes `metrics`, `artifacts`, and file paths: `stdout_path`, `stderr_path`, `config_path` (relative to repo root).
+   - Use `optimizer_list_trials` or `optimizer_get_best`. Pin with `optimizer_pin_best`.
 
-  Safety
+Timeouts and Long Runs
+- HTTP 500 “Request timeout” usually means the run exceeded connector/server timeouts.
+- Mitigations:
+  - Use `fast_mode: true` (implies `--total-timesteps` ~40k, `--num-envs 1`, deterministic).
+  - Or explicitly set smaller `total_timesteps`, `num_envs: 1`, and a realistic `timeout_minutes`.
+  - For full runs, prefer the CLI: `python data/util/optimizerctl.py run --params params.json --full --timeout-minutes 240`.
 
-  - Use only the listed tools/resources; handle errors gracefully; avoid duplicate configs;
-    respect budgets and timeouts.
-  - On restart, always resume from pinned_trial_id if present; otherwise from
-    optimizer_get_best() and leaderboard context.
+Tuning Notes (Trading)
+- `gamma` (discount factor): 0.97–0.995 typical. Higher extends credit assignment; may slow/instabilize with noisy rewards.
+- `gae_lambda` (GAE trace): 0.90–0.98 typical. Higher smooths advantages; lower reduces variance but adds bias.
+- Start: `gamma=0.99`, `gae_lambda=0.95`; adjust with `n_steps` and volatility of returns.
+
+Examples
+- Fast MCP run:
+  - tool: `optimizer_run_trial`
+  - arguments:
+    - `params`: `{ "learning_rate": 0.0002, "batch_size": 128, "ent_coef": 0.01, "clip_range": 0.15, "gamma": 0.995, "gae_lambda": 0.97, "seed": 21 }`
+    - `tag`: "exp-fast-seed21"
+    - `fast_mode`: true
+    - `timeout_minutes`: 30
+
+- Reduced full run over HTTP:
+  - `params`: `{ "learning_rate": 0.0002, "batch_size": 128, "ent_coef": 0.01, "clip_range": 0.15, "gamma": 0.99, "gae_lambda": 0.95, "total_timesteps": 60000, "num_envs": 1, "seed": 21 }`
+  - `fast_mode`: false
+  - `timeout_minutes`: 45
+
+Artifacts and State
+- On each trial: creates `data/mcp_state/trials/{trial_id}/` with `config.json`, `stdout.txt`, `stderr.txt`, `metrics.json`.
+- Appends/creates `data/mcp_state/leaderboard.csv` with summarized metrics; highest Sharpe ranked first.
+
+Common Pitfalls
+- Don’t wrap params in `{ base_trial, overrides }`; pass a flat `params` dict.
+- Use `ent_coef`, not `entropy_coef`.
+- TA‑Lib installation issues may block imports; see README.
+- GPU silent fallback: training device is printed; verify CUDA availability if expected.
+
+Changelog
+- Added support for `--gamma` and `--gae-lambda` (mapped from `gamma`, `gae_lambda`) in both CLI and MCP tool params.
+
+Style
+- Keep requests idempotent and concise. For long runs, prefer the CLI or set appropriate timeouts. Aggregate feedback from `metrics` and leaderboard before widening hyperparameter sweeps.
+
+
+
+
+ You’re right — pure random can repeat configs. I’ve changed the sweep to a controlled sampler:
+
+  - Controlled sampling
+      - Learning rate via Latin Hypercube Sampling (log-uniform in [1e-4, 3e-4]) across trials; deterministic and well-spread.
+      - Discrete params use balanced picks: each list is shuffled once (seeded) and indexed by trial number to evenly cover values over trials.
+      - Batch size constraint: adjusted to satisfy SB3 requirements (batch_size % num_envs == 0 and batch_size ≤ n_steps × num_envs).
+  - What changed in code
+      - New helpers: lhs_points, map_log_uniform, balanced_pick.
+      - sample_cfg now takes trial_idx and produces a stable, diverse config.
+      - No more unintended repeats across trials.
+  - How to use
+      - Same as before:
+          - python adaptation.py --mode sweep --train-start 2022-01-01 --train-end 2023-01-01 --eval-start 2023-01-02 --eval-end 2023-12-31 --sweep-trials 32 --sweep-seeds 2
+      - You should see different configs per trial in the CSV and stdout.
+
+
+       run codex resume 019a3bdb-03ef-7a02-b020-2d8ed76ca6cd
